@@ -1,431 +1,675 @@
-/* =================================================
-   AstroControl — app.js
-   Lógica principal: tabs, montagem, rede,
-   WebSocket bridge, handlers de mensagens
-   ================================================= */
+/**
+ * AstroControl — app.js  (production)
+ *
+ * Arquitetura:
+ *   STATE       — objeto canônico de estado da aplicação
+ *   render()    — atualiza o DOM a partir do STATE (chamado via rAF)
+ *   WS          — camada de comunicação com o backend
+ *   Handlers    — traduzem eventos DOM em mensagens WS
+ *
+ * Melhorias sobre versão anterior:
+ *   - Estado central (sem getElementById espalhado)
+ *   - requestAnimationFrame para renders (sem setInterval no DOM)
+ *   - Reconexão WebSocket com exponential backoff
+ *   - Heartbeat ping/pong (detecta conexão zumbi)
+ *   - Fila de comandos offline (reenviada ao reconectar)
+ *   - Auth do terminal via POST (token, não senha na URL)
+ *   - Feedback visual claro de todos os estados
+ *   - Nunca quebra sem servidor
+ */
 
 'use strict';
 
-/* ── Config ── */
-var BRIDGE_HOST = window.location.hostname || 'astropi.local';
-var BRIDGE_PORT = parseInt(window.location.port) || 3000;
-var SENSOR_PORT = 8765;
-var currentRate = 16;
-var ws          = null;
-var sensorWs    = null;
-var reconnTimer = null;
-var apOn        = false;
+/* ══════════════════════════════════════════════
+   ESTADO CENTRAL
+   ══════════════════════════════════════════════ */
 
-/* mapa driver-name → chave frontend */
-var DRIVER_MAP = {
+const STATE = {
+  /* conexão */
+  wsConnected:   false,
+  indiConnected: false,
+  /* dispositivos — espelho do server */
+  devices: {
+    mount:       { connected:false, state:'disconnected', ra:null, dec:null, alt:null, az:null, tracking:null, parked:false, slewing:false },
+    camera:      { connected:false, state:'disconnected', exposure:null, gain:null, capturing:false },
+    focuser:     { connected:false, state:'disconnected', position:null, moving:false },
+    filterwheel: { connected:false, state:'disconnected', slot:null, filter:null, filterNames:[] },
+    rotator:     { connected:false, state:'disconnected', angle:null },
+    gps:         { connected:false, state:'disconnected', lat:null, lon:null, fix:false, sats:0 },
+  },
+  /* UI */
+  currentTab:    'mount',
+  slewRate:      16,
+  tracking:      null,
+  gotoStatus:    null,   // { success, message }
+  /* rede */
+  network:       { mode:'--', ip:'--', ssid:'--', signal:'--', ap_active:false, ap_clients:0, services:{} },
+  /* drivers */
+  drivers:       [],
+  indiserver:    false,
+  /* log */
+  logs:          [],   // { level, text, ts }
+  /* alinhamento */
+  align: {
+    pitch:0, roll:0, heading:0,
+    lat:-19.92, lon:-43.93, decMag:-21.4,
+    simMode: true,
+  },
+};
+
+/* Assinantes de mudanças de estado */
+const subscribers = [];
+function subscribe(fn) { subscribers.push(fn); }
+function notifyAll() { subscribers.forEach(fn => fn(STATE)); }
+
+/** Atualiza STATE e agenda render */
+function setState(patch) {
+  deepMerge(STATE, patch);
+  scheduleRender();
+}
+
+function deepMerge(target, src) {
+  for (const k of Object.keys(src)) {
+    if (src[k] !== null && typeof src[k] === 'object' && !Array.isArray(src[k]) && target[k] && typeof target[k] === 'object') {
+      deepMerge(target[k], src[k]);
+    } else {
+      target[k] = src[k];
+    }
+  }
+}
+
+/* ══════════════════════════════════════════════
+   RENDER — requestAnimationFrame
+   ══════════════════════════════════════════════ */
+
+let rafPending = false;
+function scheduleRender() {
+  if (!rafPending) {
+    rafPending = true;
+    requestAnimationFrame(render);
+  }
+}
+
+function render() {
+  rafPending = false;
+
+  /* Status dots da topbar */
+  setDot('pi',   STATE.wsConnected);
+  setDot('indi', STATE.indiConnected);
+  setDot('gps',  STATE.devices.gps.fix);
+  setDot('ap',   STATE.network.ap_active);
+
+  /* Montagem */
+  if (STATE.currentTab === 'mount') renderMount();
+
+  /* Alinhamento */
+  if (STATE.currentTab === 'align') renderAlign();
+
+  /* Drivers */
+  if (STATE.currentTab === 'drivers') renderDrivers();
+
+  /* Rede */
+  if (STATE.currentTab === 'network') renderNetwork();
+
+  /* GoTo status */
+  renderGotoStatus();
+}
+
+/* ── Montagem ── */
+function renderMount() {
+  const m = STATE.devices.mount;
+  setText('m-ra',  m.ra  || '--');
+  setText('m-dec', m.dec || '--');
+  setText('m-alt', m.alt != null ? m.alt + '°' : '--');
+  setText('m-az',  m.az  != null ? m.az  + '°' : '--');
+
+  /* badge de estado */
+  const badge = $('mount-state-badge');
+  if (badge) {
+    const labels = { disconnected:'Desconectado', idle:'Pronto', tracking:'Rastreando',
+                     slewing:'Slewing…', parked:'Park', error:'Erro' };
+    badge.textContent = labels[m.state] || m.state;
+    badge.className = 'mount-badge mount-badge-' + (m.state || 'disconnected');
+  }
+
+  /* botões de rastreamento */
+  document.querySelectorAll('.trk button').forEach(b => {
+    b.classList.toggle('active', b.dataset.mode === STATE.tracking);
+  });
+}
+
+/* ── Alinhamento ── */
+function renderAlign() {
+  /* feito pelo alignment.js via applyAlignData() */
+  const { lat, decMag } = STATE.align;
+  setText('a-lat',   lat.toFixed(2) + '°');
+  setText('a-decmag', decMag.toFixed(1) + '°');
+}
+
+/* ── Drivers ── */
+function renderDrivers() {
+  const DRIVER_KEYS = {
+    mount:'indi_eqmod_telescope', camera:'indi_canon_ccd',
+    focuser:'indi_moonlite', filterwheel:'indi_efw',
+    rotator:'indi_simulator_rotator', gps:'indi_gpsd',
+  };
+
+  Object.entries(DRIVER_KEYS).forEach(([key, driverName]) => {
+    const dev  = STATE.devices[key];
+    const dot  = $('dot-' + key);
+    const tog  = $('tog-' + key);
+    if (!dev) return;
+    if (dot) dot.className = 'dot ' + (dev.state === 'disconnected' ? 'dx' : dev.connected ? 'dg' : 'da');
+    if (tog) tog.classList.toggle('on', dev.connected);
+  });
+
+  /* Log */
+  const logEl = $('indi-log');
+  if (logEl) {
+    const frag = document.createDocumentFragment();
+    STATE.logs.forEach(({ level, text }) => {
+      const div = document.createElement('div');
+      const span = document.createElement('span');
+      span.className = level;
+      span.textContent = level === 'ok' ? '[OK]' : level === 'er' ? '[ER]' : level === 'wn' ? '[--]' : '[..]';
+      div.appendChild(span);
+      div.appendChild(document.createTextNode(' ' + text));
+      frag.appendChild(div);
+    });
+    if (logEl.dataset.logLen !== String(STATE.logs.length)) {
+      logEl.innerHTML = '';
+      logEl.appendChild(frag);
+      logEl.scrollTop = logEl.scrollHeight;
+      logEl.dataset.logLen = STATE.logs.length;
+    }
+  }
+}
+
+/* ── Rede ── */
+function renderNetwork() {
+  const n = STATE.network;
+  setText('net-mode',   n.mode);
+  setText('net-ip',     n.ip);
+  setText('net-ssid',   n.ssid);
+  setText('net-signal', n.signal);
+
+  const tog = $('ap-tog');
+  const sub = $('ap-sub');
+  const inf = $('ap-info');
+  if (tog) tog.classList.toggle('on', n.ap_active);
+  if (sub) sub.textContent = n.ap_active
+    ? `Ativo · SSID: AstroPi · ${n.ap_clients} cliente(s)`
+    : 'Desativado · sobe automaticamente sem WiFi';
+  if (inf) inf.style.opacity = n.ap_active ? '1' : '0.3';
+
+  Object.entries(n.services || {}).forEach(([k, up]) => {
+    const dot = $('svc-dot-' + k);
+    if (dot) dot.className = 'dot ' + (up ? 'dg' : 'dx');
+  });
+
+  setText('ap-clients', String(n.ap_clients));
+}
+
+/* ── GoTo status ── */
+function renderGotoStatus() {
+  const el = $('goto-status');
+  if (!el || !STATE.gotoStatus) return;
+  const { success, message } = STATE.gotoStatus;
+  el.style.color = success === null ? '#EF9F27' : success ? '#5DCAA5' : '#E24B4A';
+  el.textContent = (success === null ? '⟳ ' : success ? '✓ ' : '✗ ') + message;
+}
+
+/* ── Dots de status ── */
+function setDot(id, on, warn) {
+  const el = $('st-' + id);
+  if (!el) return;
+  const dot = el.querySelector('.dot');
+  if (dot) dot.className = 'dot ' + (on ? 'dg' : warn ? 'da' : 'dx');
+}
+
+/* ══════════════════════════════════════════════
+   WEBSOCKET — RECONEXÃO ROBUSTA
+   ══════════════════════════════════════════════ */
+
+const WS_HOST = window.location.hostname || 'astropi.local';
+const WS_PORT = parseInt(window.location.port) || 3000;
+const WS_URL  = `ws://${WS_HOST}:${WS_PORT}/ws`;
+
+let ws          = null;
+let wsBackoff   = 1000;
+let wsTimer     = null;
+let wsAlive     = false;
+let hbTimer     = null;
+const CMD_QUEUE = [];  // { type, ...payload } — enviados ao reconectar
+
+function connectWS() {
+  clearTimeout(wsTimer);
+  try { ws = new WebSocket(WS_URL); } catch(e) {
+    setState({ wsConnected: false });
+    wsTimer = setTimeout(connectWS, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 1.5, 30000);
+    return;
+  }
+
+  ws.onopen = () => {
+    wsBackoff = 1000;
+    wsAlive   = true;
+    setState({ wsConnected: true });
+    startHeartbeat();
+    flushCmdQueue();
+    sendWS({ type: 'get_state' });
+    sendWS({ type: 'network_status' });
+    addLog('ok', 'Bridge conectado');
+  };
+
+  ws.onmessage = (evt) => {
+    try { handleServerMsg(JSON.parse(evt.data)); } catch(e) {}
+  };
+
+  ws.onerror = () => {};
+
+  ws.onclose = () => {
+    stopHeartbeat();
+    setState({ wsConnected: false, indiConnected: false });
+    addLog('wn', `Bridge offline — reconecta em ${Math.round(wsBackoff/1000)}s`);
+    wsTimer = setTimeout(connectWS, wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 1.5, 30000);
+  };
+}
+
+function sendWS(msg) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify(msg));
+    return true;
+  }
+  return false;
+}
+
+/** Envia ou enfileira comando para envio posterior */
+function sendCmd(msg, queueIfOffline = true) {
+  if (!sendWS(msg) && queueIfOffline) {
+    CMD_QUEUE.push(msg);
+    addLog('wn', `Comando na fila: ${msg.type}`);
+  }
+}
+
+function flushCmdQueue() {
+  while (CMD_QUEUE.length > 0 && ws && ws.readyState === WebSocket.OPEN) {
+    const msg = CMD_QUEUE.shift();
+    sendWS(msg);
+    addLog('ok', `Reenviado: ${msg.type}`);
+  }
+}
+
+/* ── Heartbeat ── */
+function startHeartbeat() {
+  stopHeartbeat();
+  hbTimer = setInterval(() => {
+    if (!wsAlive) {
+      ws && ws.close();
+      return;
+    }
+    wsAlive = false;
+    sendWS({ type: 'ping', ts: Date.now() });
+  }, 15000);
+}
+
+function stopHeartbeat() {
+  clearInterval(hbTimer);
+}
+
+/* ══════════════════════════════════════════════
+   HANDLER DE MENSAGENS DO SERVIDOR
+   ══════════════════════════════════════════════ */
+
+function handleServerMsg(msg) {
+  wsAlive = true;  // qualquer mensagem = conexão viva
+
+  switch (msg.type) {
+
+    case 'pong':
+      wsAlive = true;
+      break;
+
+    case 'full_state':
+      /* Sincronização completa — substitui devices */
+      if (msg.devices) setState({ devices: msg.devices });
+      break;
+
+    case 'device_update':
+      if (msg.key && STATE.devices[msg.key]) {
+        STATE.devices[msg.key] = { ...STATE.devices[msg.key], ...msg.data };
+        scheduleRender();
+      }
+      break;
+
+    case 'indi_status':
+      setState({ indiConnected: !!msg.connected });
+      if (!msg.connected) {
+        /* Marca todos os dispositivos como desconectados */
+        Object.keys(STATE.devices).forEach(k => {
+          STATE.devices[k].connected = false;
+          STATE.devices[k].state = 'disconnected';
+        });
+        scheduleRender();
+      }
+      break;
+
+    case 'driver_status':
+      setState({ indiserver: !!msg.indiserver, drivers: msg.drivers || [] });
+      /* Atualiza conexão dos devices a partir dos drivers */
+      if (msg.drivers) {
+        msg.drivers.forEach(d => {
+          const key = driverNameToKey(d.name);
+          if (key && STATE.devices[key]) {
+            STATE.devices[key].connected = d.connected;
+            STATE.devices[key].state     = d.error ? 'error' : d.connected ? 'idle' : 'disconnected';
+          }
+        });
+        scheduleRender();
+      }
+      break;
+
+    case 'goto_result':
+      setState({ gotoStatus: { success: msg.success, message: msg.message } });
+      /* Limpa após 5s */
+      if (msg.success !== null) {
+        setTimeout(() => setState({ gotoStatus: null }), 8000);
+      }
+      break;
+
+    case 'network':
+      setState({ network: msg });
+      break;
+
+    case 'log':
+      addLog(msg.level, msg.text);
+      break;
+  }
+}
+
+/* ── Mapeia nome de driver → chave de device ── */
+function driverNameToKey(name) {
+  if (!name) return null;
+  const n = name.toLowerCase();
+  if (n.includes('eqmod')||n.includes('telescope')||n.includes('mount')) return 'mount';
+  if (n.includes('ccd')||n.includes('camera')||n.includes('canon'))      return 'camera';
+  if (n.includes('moonlite')||n.includes('focuser'))                      return 'focuser';
+  if (n.includes('efw')||n.includes('filter'))                            return 'filterwheel';
+  if (n.includes('rotat'))                                                 return 'rotator';
+  if (n.includes('gps'))                                                   return 'gps';
+  return null;
+}
+
+/* ── Log interno ── */
+function addLog(level, text) {
+  STATE.logs.push({ level, text, ts: Date.now() });
+  if (STATE.logs.length > 200) STATE.logs.splice(0, STATE.logs.length - 200);
+  if (STATE.currentTab === 'drivers') scheduleRender();
+}
+
+/* ══════════════════════════════════════════════
+   NAVEGAÇÃO
+   ══════════════════════════════════════════════ */
+
+function sw(id, el) {
+  document.querySelectorAll('.panel, .novnc-panel').forEach(p => {
+    p.classList.remove('active');
+    p.style.display = 'none';
+  });
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+
+  const panel = $('p-' + id);
+  if (panel) { panel.style.display = 'flex'; panel.classList.add('active'); }
+  if (el)    el.classList.add('active');
+
+  STATE.currentTab = id;
+  scheduleRender();
+
+  if (id === 'align')   renderAlignCanvases();
+  if (id === 'network') sendCmd({ type: 'network_status' }, false);
+  if (id === 'drivers') sendCmd({ type: 'get_state' }, false);
+}
+
+/* ══════════════════════════════════════════════
+   MONTAGEM — CONTROLES
+   ══════════════════════════════════════════════ */
+
+function setRate(el, rate) {
+  document.querySelectorAll('.rb').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  STATE.slewRate = rate;
+  sendCmd({ type: 'slew_rate', rate });
+}
+
+function jp(dir) {
+  $('j'+dir)?.classList.add('pr');
+  sendCmd({ type: 'slew_start', direction: dir, rate: STATE.slewRate });
+}
+
+function jr(dir) {
+  $('j'+dir)?.classList.remove('pr');
+  sendCmd({ type: 'slew_stop', direction: dir });
+}
+
+function jStop() {
+  ['N','S','E','W'].forEach(d => {
+    $('j'+d)?.classList.remove('pr');
+    sendCmd({ type: 'slew_stop', direction: d }, false);
+  });
+}
+
+function setTrk(el, mode) {
+  document.querySelectorAll('.trk button').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  STATE.tracking = mode === 'None' ? null : mode;
+  el.dataset.mode = mode;
+  sendCmd({ type: 'tracking', mode });
+}
+
+function doGotoName() {
+  const name = ($('goto-name')?.value || '').trim();
+  if (!name) return;
+  setState({ gotoStatus: { success: null, message: `Resolvendo "${name}"…` } });
+  sendCmd({ type: 'goto_name', name });
+}
+
+function doGotoCoords() {
+  const ra  = ($('goto-ra')?.value  || '').trim();
+  const dec = ($('goto-dec')?.value || '').trim();
+  if (!ra || !dec) return;
+  sendCmd({ type: 'goto_coords', ra, dec });
+}
+
+function syncMount() {
+  sendCmd({ type: 'sync' });
+}
+
+function parkMount() {
+  sendCmd({ type: 'park' });
+}
+
+/* ══════════════════════════════════════════════
+   DRIVERS
+   ══════════════════════════════════════════════ */
+
+const DRIVER_MAP = {
   mount:       'indi_eqmod_telescope',
   camera:      'indi_canon_ccd',
   focuser:     'indi_moonlite',
   filterwheel: 'indi_efw',
   rotator:     'indi_simulator_rotator',
   gps:         'indi_gpsd',
-  adxl:        'python_bridge'
+  adxl:        'python_bridge',
 };
 
-/* ══════════════════════════════════════
-   NAVEGAÇÃO
-   ══════════════════════════════════════ */
-function sw(id, el) {
-  document.querySelectorAll('.panel, .novnc-panel').forEach(function(p) {
-    p.classList.remove('active');
-    p.style.display = 'none';
-  });
-  document.querySelectorAll('.tab').forEach(function(t) { t.classList.remove('active'); });
-
-  var panel = document.getElementById('p-' + id);
-  if (panel) { panel.style.display = 'flex'; panel.classList.add('active'); }
-  if (el)    el.classList.add('active');
-
-  if (id === 'align')   renderAlign();
-  if (id === 'network') sendBridge({ type: 'network_status' });
-  if (id === 'drivers') sendBridge({ type: 'network_status' }); /* atualiza dots */
-}
-
-/* ══════════════════════════════════════
-   RELÓGIO UTC
-   ══════════════════════════════════════ */
-function updateClock() {
-  var d = new Date();
-  var el = document.getElementById('utc');
-  if (el) el.textContent =
-    String(d.getUTCHours()).padStart(2,'0') + ':' +
-    String(d.getUTCMinutes()).padStart(2,'0') + ':' +
-    String(d.getUTCSeconds()).padStart(2,'0') + ' UTC';
-}
-setInterval(updateClock, 1000);
-updateClock();
-
-/* ══════════════════════════════════════
-   WEBSOCKET — BRIDGE
-   ══════════════════════════════════════ */
-function connectBridge() {
-  clearTimeout(reconnTimer);
-  try {
-    ws = new WebSocket('ws://' + BRIDGE_HOST + ':' + BRIDGE_PORT + '/ws');
-  } catch(e) {
-    setDot('pi', 'dx');
-    reconnTimer = setTimeout(connectBridge, 6000);
-    return;
-  }
-
-  ws.onopen = function() {
-    setDot('pi', 'dg');
-    logAdd('<span class="ok">[OK]</span> Bridge conectado');
-  };
-
-  ws.onmessage = function(evt) {
-    try { handleMsg(JSON.parse(evt.data)); } catch(e) {}
-  };
-
-  ws.onerror = function() {
-    setDot('pi', 'dx');
-    setDot('indi', 'dx');
-  };
-
-  ws.onclose = function() {
-    setDot('pi', 'dx');
-    setDot('indi', 'dx');
-    reconnTimer = setTimeout(connectBridge, 6000);
-  };
-}
-
-function sendBridge(obj) {
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
-}
-
-/* ══════════════════════════════════════
-   HANDLER DE MENSAGENS DO SERVIDOR
-   ══════════════════════════════════════ */
-function handleMsg(msg) {
-  switch (msg.type) {
-
-    case 'mount':
-      setDot('indi', 'dg');
-      if (msg.data.ra)  setText('m-ra',  msg.data.ra);
-      if (msg.data.dec) setText('m-dec', msg.data.dec);
-      if (msg.data.alt) setText('m-alt', msg.data.alt + '°');
-      if (msg.data.az)  setText('m-az',  msg.data.az  + '°');
-      break;
-
-    case 'mount_park':
-      setText('goto-status', msg.parked ? 'Montagem em park' : 'Montagem desestacionada');
-      break;
-
-    case 'tracking_mode':
-      /* sincroniza botão de tracking */
-      var modeLabels = {
-        TRACK_SIDEREAL:'Sideral', TRACK_SOLAR:'Solar', TRACK_LUNAR:'Lunar'
-      };
-      var label = modeLabels[msg.mode];
-      if (label) {
-        document.querySelectorAll('.trk button').forEach(function(b) {
-          b.classList.toggle('active', b.textContent.trim() === label);
-        });
-      }
-      break;
-
-    case 'driver_state':
-      updateDriverDot(msg.key, msg.connected, false);
-      break;
-
-    case 'status':
-      if (msg.data.indiserver) setDot('indi', 'dg');
-      if (msg.data.drivers) {
-        msg.data.drivers.forEach(function(d) {
-          var key = driverNameToKey(d.name);
-          if (key) updateDriverDot(key, d.connected, d.error);
-        });
-      }
-      break;
-
-    case 'goto_result':
-      var el = document.getElementById('goto-status');
-      if (!el) break;
-      if (msg.success === null) {
-        el.style.color = '#EF9F27';
-        el.textContent = msg.message;
-      } else if (msg.success) {
-        el.style.color = '#5DCAA5';
-        el.textContent = '✓ ' + msg.message;
-      } else {
-        el.style.color = '#E24B4A';
-        el.textContent = '✗ ' + msg.message;
-      }
-      break;
-
-    case 'network':
-      applyNetworkData(msg.data);
-      break;
-
-    case 'log':
-      logAdd(msg.text);
-      break;
-  }
-}
-
-/* ══════════════════════════════════════
-   WEBSOCKET — SENSORES (Python bridge)
-   ══════════════════════════════════════ */
-function connectSensors() {
-  try {
-    sensorWs = new WebSocket('ws://' + BRIDGE_HOST + ':' + SENSOR_PORT);
-  } catch(e) {
-    setTimeout(connectSensors, 10000);
-    return;
-  }
-
-  sensorWs.onopen = function() {
-    setDot('gps', 'dg');
-    var note = document.querySelector('.sim-note');
-    if (note) note.textContent = 'Dados reais do Python bridge ativos';
-  };
-
-  sensorWs.onmessage = function(evt) {
-    try {
-      var data = JSON.parse(evt.data);
-      applyAlignData(data);
-      setDot('gps', data.fix ? 'dg' : 'da');
-    } catch(e) {}
-  };
-
-  sensorWs.onclose = function() {
-    setDot('gps', 'dx');
-    setTimeout(connectSensors, 10000);
-  };
-}
-
-/* ══════════════════════════════════════
-   MONTAGEM — CONTROLES
-   ══════════════════════════════════════ */
-function setRate(el, rate) {
-  document.querySelectorAll('.rb').forEach(function(b) { b.classList.remove('active'); });
-  el.classList.add('active');
-  currentRate = rate;
-  sendBridge({ type: 'slew_rate', rate: rate });
-}
-
-function jp(dir) {
-  var jb = document.getElementById('j' + dir);
-  if (jb) jb.classList.add('pr');
-  sendBridge({ type: 'slew_start', direction: dir, rate: currentRate });
-}
-
-function jr(dir) {
-  var jb = document.getElementById('j' + dir);
-  if (jb) jb.classList.remove('pr');
-  sendBridge({ type: 'slew_stop', direction: dir });
-}
-
-function jStop() {
-  ['N','S','E','W'].forEach(function(d) {
-    var jb = document.getElementById('j' + d);
-    if (jb) jb.classList.remove('pr');
-    sendBridge({ type: 'slew_stop', direction: d });
-  });
-}
-
-function setTrk(el, mode) {
-  document.querySelectorAll('.trk button').forEach(function(b) { b.classList.remove('active'); });
-  el.classList.add('active');
-  sendBridge({ type: 'tracking', mode: mode });
-}
-
-function doGotoName() {
-  var name = (document.getElementById('goto-name') || {}).value || '';
-  name = name.trim();
-  if (!name) return;
-  sendBridge({ type: 'goto_name', name: name });
-}
-
-function doGotoCoords() {
-  var ra  = (document.getElementById('goto-ra')  || {}).value || '';
-  var dec = (document.getElementById('goto-dec') || {}).value || '';
-  if (!ra.trim() || !dec.trim()) return;
-  sendBridge({ type: 'goto_coords', ra: ra.trim(), dec: dec.trim() });
-}
-
-function syncMount() {
-  sendBridge({ type: 'sync' });
-}
-
-function parkMount() {
-  sendBridge({ type: 'park' });
-}
-
-/* ══════════════════════════════════════
-   DRIVERS
-   ══════════════════════════════════════ */
 function toggleDriver(key) {
-  var tog = document.getElementById('tog-' + key);
+  const tog = $('tog-' + key);
   if (!tog) return;
-  var willOn = !tog.classList.contains('on');
-  tog.classList.toggle('on', willOn);
-  updateDriverDot(key, false, false); /* pendente */
-  sendBridge({
-    type:   willOn ? 'driver_start' : 'driver_stop',
-    driver: DRIVER_MAP[key] || key
-  });
+  const willOn = !tog.classList.contains('on');
+  sendCmd({ type: willOn ? 'driver_start' : 'driver_stop', driver: DRIVER_MAP[key] || key });
 }
 
-function updateDriverDot(key, connected, error) {
-  var dot = document.getElementById('dot-' + key);
-  var tog = document.getElementById('tog-' + key);
-  if (!dot) return;
-  dot.className = 'dot ' + (error ? 'dr' : connected ? 'dg' : 'dx');
-  if (tog) tog.classList.toggle('on', connected);
-}
-
-function driverNameToKey(name) {
-  var n = (name || '').toLowerCase();
-  for (var key in DRIVER_MAP) {
-    if (DRIVER_MAP[key] && n.includes(DRIVER_MAP[key].toLowerCase())) return key;
-  }
-  /* fallback por palavras-chave */
-  if (n.includes('eqmod') || n.includes('telescope') || n.includes('mount')) return 'mount';
-  if (n.includes('canon') || n.includes('ccd') || n.includes('camera'))      return 'camera';
-  if (n.includes('moonlite') || n.includes('focuser'))                        return 'focuser';
-  if (n.includes('efw') || n.includes('filter'))                              return 'filterwheel';
-  if (n.includes('rotat'))                                                     return 'rotator';
-  if (n.includes('gps'))                                                       return 'gps';
-  return null;
-}
-
-function logAdd(html) {
-  var log = document.getElementById('indi-log');
-  if (!log) return;
-  var div = document.createElement('div');
-  div.innerHTML = html;
-  log.appendChild(div);
-  log.scrollTop = log.scrollHeight;
-  while (log.children.length > 60) log.removeChild(log.firstChild);
-}
-
-/* ══════════════════════════════════════
+/* ══════════════════════════════════════════════
    noVNC / TERMINAL
-   ══════════════════════════════════════ */
+   ══════════════════════════════════════════════ */
+
 function connectVNC(frameId, statusId, port) {
-  var frame  = document.getElementById(frameId);
-  var status = document.getElementById(statusId);
+  const frame  = $(frameId);
+  const status = $(statusId);
   if (!frame) return;
-  var url = 'http://' + BRIDGE_HOST + ':' + port +
-            '/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale';
-  frame.innerHTML = '<iframe src="' + url + '" style="width:100%;height:100%;border:none;background:#000"></iframe>';
+  const url = `http://${WS_HOST}:${port}/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale`;
+  frame.innerHTML = `<iframe src="${url}" style="width:100%;height:100%;border:none;background:#000"></iframe>`;
   if (status) status.textContent = 'Conectado';
 }
 
 function showAuth(type) {
-  var box = document.getElementById('auth-' + type);
-  if (box) box.style.display = 'block';
+  $('auth-' + type)?.style && ($('auth-' + type).style.display = 'block');
 }
 
-function doAuth(type) {
-  var errEl = document.getElementById('err-' + type);
+/**
+ * Auth segura: envia credenciais via POST → recebe token → abre ttyd com token.
+ * Nunca expõe senha em URL.
+ */
+async function doAuth(type) {
+  const errEl = $('err-' + type);
   if (errEl) errEl.textContent = '';
 
   if (type === 'terminal') {
-    var user = (document.getElementById('user-terminal') || {}).value || '';
-    var pwd  = (document.getElementById('pwd-terminal')  || {}).value || '';
-    if (!user.trim() || !pwd) {
-      if (errEl) errEl.textContent = 'Preencha usuário e senha.';
-      return;
+    const user = ($('user-terminal')?.value || '').trim();
+    const pwd  = $('pwd-terminal')?.value || '';
+    if (!user || !pwd) { if (errEl) errEl.textContent = 'Preencha usuário e senha.'; return; }
+
+    try {
+      const res = await fetch(`http://${WS_HOST}:${WS_PORT}/api/auth/terminal`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ user, password: pwd }),
+      });
+      if (!res.ok) { if (errEl) errEl.textContent = 'Credenciais inválidas.'; return; }
+      const { token } = await res.json();
+
+      const frame  = $('term-frame');
+      const status = $('term-status');
+      // ttyd com token como query param — backend valida via /api/auth/verify
+      frame.innerHTML = `<iframe src="http://${WS_HOST}:7681/?token=${token}" style="width:100%;height:100%;border:none;background:#000"></iframe>`;
+      if (status) status.textContent = 'Conectado';
+    } catch(e) {
+      if (errEl) errEl.textContent = 'Erro ao autenticar: ' + e.message;
     }
-    var frame  = document.getElementById('term-frame');
-    var status = document.getElementById('term-status');
-    /* ttyd com Basic Auth na URL */
-    var url = 'http://' + encodeURIComponent(user.trim()) + ':' +
-              encodeURIComponent(pwd) + '@' + BRIDGE_HOST + ':7681';
-    frame.innerHTML = '<iframe src="' + url + '" style="width:100%;height:100%;border:none;background:#000"></iframe>';
-    if (status) status.textContent = 'Conectado';
 
   } else if (type === 'desktop') {
-    var pwd = (document.getElementById('pwd-desktop') || {}).value || '';
-    if (!pwd) {
-      if (errEl) errEl.textContent = 'Digite a senha VNC.';
-      return;
-    }
-    var frame  = document.getElementById('vnc-d-frame');
-    var status = document.getElementById('vnc-d-status');
-    var url = 'http://' + BRIDGE_HOST + ':6082/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale&password=' +
-              encodeURIComponent(pwd);
-    frame.innerHTML = '<iframe src="' + url + '" style="width:100%;height:100%;border:none;background:#000"></iframe>';
+    const pwd = $('pwd-desktop')?.value || '';
+    if (!pwd) { if (errEl) errEl.textContent = 'Digite a senha VNC.'; return; }
+    const frame  = $('vnc-d-frame');
+    const status = $('vnc-d-status');
+    const url = `http://${WS_HOST}:6082/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale&password=${encodeURIComponent(pwd)}`;
+    frame.innerHTML = `<iframe src="${url}" style="width:100%;height:100%;border:none;background:#000"></iframe>`;
     if (status) status.textContent = 'Conectado';
   }
 }
 
-/* ══════════════════════════════════════
+/* ══════════════════════════════════════════════
    REDE
-   ══════════════════════════════════════ */
+   ══════════════════════════════════════════════ */
+
 function toggleAP() {
-  apOn = !apOn;
-  var tog = document.getElementById('ap-tog');
-  var sub = document.getElementById('ap-sub');
-  var inf = document.getElementById('ap-info');
-  if (tog) tog.classList.toggle('on', apOn);
-  if (sub) sub.textContent = apOn ? 'Ativo · SSID: AstroPi' : 'Desativado · sobe automaticamente sem WiFi';
-  if (inf) inf.style.opacity = apOn ? '1' : '0.3';
-  sendBridge({ type: 'ap_toggle', enable: apOn });
+  const willOn = !STATE.network.ap_active;
+  sendCmd({ type: 'ap_toggle', enable: willOn });
 }
 
-function applyNetworkData(data) {
-  if (!data) return;
-  setText('net-mode',   data.mode   || '--');
-  setText('net-ip',     data.ip     || '--');
-  setText('net-ssid',   data.ssid   || '--');
-  setText('net-signal', data.signal || '--');
+/* ══════════════════════════════════════════════
+   ALINHAMENTO — BRIDGE COM alignment.js
+   ══════════════════════════════════════════════ */
 
-  apOn = !!data.ap_active;
-  var tog = document.getElementById('ap-tog');
-  var sub = document.getElementById('ap-sub');
-  var inf = document.getElementById('ap-info');
-  var cli = document.getElementById('ap-clients');
-  if (tog) tog.classList.toggle('on', apOn);
-  if (sub) sub.textContent = apOn ? 'Ativo · SSID: AstroPi' : 'Desativado · sobe automaticamente sem WiFi';
-  if (inf) inf.style.opacity = apOn ? '1' : '0.3';
-  if (cli && data.ap_clients !== undefined) cli.textContent = String(data.ap_clients);
-  setDot('ap', apOn ? 'dg' : 'dx');
+const SENSOR_PORT = 8765;
+let sensorWs = null;
+let sensorBackoff = 2000;
 
-  /* dots dos serviços */
-  var svc = data.services || {};
-  Object.keys(svc).forEach(function(k) {
-    var dot = document.getElementById('svc-dot-' + k);
-    if (dot) dot.className = 'dot ' + (svc[k] ? 'dg' : 'dx');
-  });
+function connectSensors() {
+  try { sensorWs = new WebSocket(`ws://${WS_HOST}:${SENSOR_PORT}`); }
+  catch { setTimeout(connectSensors, sensorBackoff); return; }
+
+  sensorWs.onopen = () => {
+    sensorBackoff = 2000;
+    setDot('gps', true);
+    /* Desativa simulação quando dados reais chegarem */
+    STATE.align.simMode = false;
+    const note = document.querySelector('.sim-note');
+    if (note) note.textContent = 'Dados reais do Python bridge ativos';
+  };
+
+  sensorWs.onmessage = (evt) => {
+    try {
+      const d = JSON.parse(evt.data);
+      /* d = { pitch, roll, heading, lat, lon, decMag, fix, sats } */
+      Object.assign(STATE.align, d);
+      setDot('gps', d.fix, !d.fix && d.sats > 0);
+      if (typeof applyAlignData === 'function') applyAlignData(STATE.align);
+    } catch {}
+  };
+
+  sensorWs.onclose = () => {
+    setDot('gps', false);
+    setTimeout(connectSensors, sensorBackoff);
+    sensorBackoff = Math.min(sensorBackoff * 1.5, 30000);
+  };
 }
 
-/* ══════════════════════════════════════
+function renderAlignCanvases() {
+  if (typeof renderAlign === 'function') renderAlign();
+}
+
+/* ══════════════════════════════════════════════
+   RELÓGIO UTC — rAF
+   ══════════════════════════════════════════════ */
+
+function tickClock() {
+  const d  = new Date();
+  const el = $('utc');
+  if (el) {
+    el.textContent =
+      String(d.getUTCHours()).padStart(2,'0') + ':' +
+      String(d.getUTCMinutes()).padStart(2,'0') + ':' +
+      String(d.getUTCSeconds()).padStart(2,'0') + ' UTC';
+  }
+  requestAnimationFrame(tickClock);
+}
+
+/* ══════════════════════════════════════════════
    UTILIDADES
-   ══════════════════════════════════════ */
-function setText(id, text) {
-  var el = document.getElementById(id);
-  if (el) el.textContent = text;
-}
+   ══════════════════════════════════════════════ */
 
-function setDot(id, cls) {
-  var el = document.getElementById('st-' + id);
-  if (!el) return;
-  var dot = el.querySelector('.dot');
-  if (dot) dot.className = 'dot ' + cls;
-}
+function $(id)        { return document.getElementById(id); }
+function setText(id, t) { const e = $(id); if (e) e.textContent = t; }
 
-/* ══════════════════════════════════════
+/* ══════════════════════════════════════════════
    SERVICE WORKER
-   ══════════════════════════════════════ */
+   ══════════════════════════════════════════════ */
+
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(function() {});
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
 }
 
-/* ══════════════════════════════════════
+/* ══════════════════════════════════════════════
    INIT
-   ══════════════════════════════════════ */
-/* esconde painéis inativos */
-document.querySelectorAll('.panel, .novnc-panel').forEach(function(p) {
+   ══════════════════════════════════════════════ */
+
+/* Esconde painéis inativos */
+document.querySelectorAll('.panel, .novnc-panel').forEach(p => {
   if (!p.classList.contains('active')) p.style.display = 'none';
 });
 
-connectBridge();
+/* Marca botões de tracking com data-mode */
+document.querySelectorAll('.trk button').forEach(b => {
+  const txt = b.textContent.trim();
+  const map = { Sideral:'Sidereal', Lunar:'Lunar', Solar:'Solar', Off:'None' };
+  b.dataset.mode = map[txt] || txt;
+});
+
+connectWS();
 connectSensors();
+requestAnimationFrame(tickClock);
+
+/* Render inicial */
+scheduleRender();

@@ -8,7 +8,7 @@
 set -e
 
 USER_NAME="samu192"
-DESKTOP_VNC_PASS="ls100619"  # altere aqui
+DESKTOP_VNC_PASS="astrocontrol"  # altere aqui
 
 echo ">>> Instalando dependências..."
 apt install -y xvfb x11vnc novnc openbox pcmanfm
