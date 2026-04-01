@@ -1,0 +1,19 @@
+{
+  "name": "astrocontrol",
+  "version": "1.0.0",
+  "description": "Interface PWA para controle de astrofotografia com Raspberry Pi 5 + INDI",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "ws": "^8.14.2"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "author": "AstroControl",
+  "license": "MIT"
+}

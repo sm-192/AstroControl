@@ -1,0 +1,15 @@
+[Unit]
+Description=AstroControl PWA
+After=network.target kstars-headless.service indiweb.service
+
+[Service]
+Type=simple
+User=samu192
+WorkingDirectory=/home/samu192/astrocontrol
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+
+[Install]
+WantedBy=multi-user.target
