@@ -709,13 +709,36 @@ document.addEventListener('dblclick', (e) => {
    noVNC / TERMINAL
    ══════════════════════════════════════════════ */
 
+/* ─── mapa frameId → id do rotate-hint ─── */
+const _rotateHintMap = {
+  'vnc-k-frame': 'rotate-kstars',
+  'vnc-p-frame': 'rotate-phd2',
+  'vnc-d-frame': 'rotate-desktop',
+};
+
+/** Esconde o rotate-hint para que o iframe fique acessível em portrait */
+function _hideRotateHint(frameId) {
+  const hintId = _rotateHintMap[frameId];
+  if (!hintId) return;
+  const hint = $(hintId);
+  if (hint) {
+    hint.style.display = 'none';  // sobrescreve o @media portrait
+    hint.dataset.dismissed = '1';
+  }
+}
+
 function connectVNC(frameId, statusId, port) {
   const frame = $(frameId);
   const status = $(statusId);
   if (!frame) return;
+
+  // Tenta vnc_lite.html; se não existir, noVNC serve index.html na raiz
   const url = `http://${WS_HOST}:${port}/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale`;
   frame.innerHTML = `<iframe src="${url}" style="width:100%;height:100%;border:none;background:#000" allow="fullscreen"></iframe>`;
   if (status) status.textContent = 'Conectado';
+
+  // Oculta o aviso de rotação — usuário já escolheu conectar
+  _hideRotateHint(frameId);
 }
 
 function showAuth(type) {
@@ -729,7 +752,7 @@ async function doAuth(type) {
 
   if (type === 'terminal') {
     const user = ($('user-terminal')?.value || '').trim();
-    const pwd = $('pwd-terminal')?.value || '';
+    const pwd  = $('pwd-terminal')?.value || '';
     if (!user || !pwd) { if (errEl) errEl.textContent = 'Preencha usuário e senha.'; return; }
     try {
       const res = await fetch(`http://${WS_HOST}:${WS_PORT}/api/auth/terminal`, {
@@ -737,23 +760,26 @@ async function doAuth(type) {
         body: JSON.stringify({ user, password: pwd }),
       });
       if (!res.ok) { if (errEl) errEl.textContent = 'Credenciais inválidas.'; return; }
-      const { token } = await res.json();
-      const frame = $('term-frame');
+      // Token validado no AstroControl server — abre ttyd diretamente
+      // (ttyd não conhece o token, apenas o AstroControl valida)
+      const frame  = $('term-frame');
       const status = $('term-status');
-      frame.innerHTML = `<iframe src="http://${WS_HOST}:7681/?token=${token}" style="width:100%;height:100%;border:none;background:#000" allow="fullscreen"></iframe>`;
+      frame.innerHTML = `<iframe src="http://${WS_HOST}:7681/" style="width:100%;height:100%;border:none;background:#000" allow="fullscreen"></iframe>`;
       if (status) status.textContent = 'Conectado';
     } catch (e) {
       if (errEl) errEl.textContent = 'Erro: ' + e.message;
     }
 
   } else if (type === 'desktop') {
-    const pwd = $('pwd-desktop')?.value || '';
+    const pwd    = $('pwd-desktop')?.value || '';
     if (!pwd) { if (errEl) errEl.textContent = 'Digite a senha VNC.'; return; }
-    const frame = $('vnc-d-frame');
+    const frame  = $('vnc-d-frame');
     const status = $('vnc-d-status');
+    // Passa a senha via URL (suportado pelo noVNC vnc_lite.html)
     const url = `http://${WS_HOST}:6082/vnc_lite.html?autoconnect=1&reconnect=1&resize=scale&password=${encodeURIComponent(pwd)}`;
     frame.innerHTML = `<iframe src="${url}" style="width:100%;height:100%;border:none;background:#000" allow="fullscreen"></iframe>`;
     if (status) status.textContent = 'Conectado';
+    _hideRotateHint('vnc-d-frame');
   }
 }
 
