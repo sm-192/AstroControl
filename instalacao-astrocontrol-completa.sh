@@ -29,8 +29,8 @@ set -e  # Para ao primeiro erro
 USER_NAME="samu192"
 USER_HOME="/home/${USER_NAME}"
 ASTRO_DIR="${USER_HOME}/astrocontrol"
-DESKTOP_VNC_PASS="astrocontrol"
-TTYD_PASS="astrocontrol"
+DESKTOP_VNC_PASS="ls100619"
+TTYD_PASS="ls100619"
 
 # ── Cores para output ─────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -667,7 +667,7 @@ echo "   Reiniciar serviço:     sudo systemctl restart kstars-display"
 echo ""
 echo -e "${YELLOW}⚠ IMPORTANTE:${NC} O sistema precisa ser reiniciado para aplicar configurações de SPI/I2C/UART"
 echo ""
-read -p "Reiniciar agora? (s/N): " -n 1 -r
+read -p "Reiniciar agora? (S/N): " -n 1 -r
 echo
 if [[ $REPLY =~ ^[Ss]$ ]]; then
     print_step "Reiniciando em 5 segundos..."
