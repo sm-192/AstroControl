@@ -1,1 +1,1 @@
-# Astrocontrol
+# AstroControl
