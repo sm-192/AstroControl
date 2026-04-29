@@ -111,7 +111,7 @@ function discoveryMode(ws, enable) {
         return;
       }
 
-      log(ws, 'ok', 'Iniciando modo descoberta...');
+      log(ws, 'ok', 'Iniciando modo descoberta com watchdog de segurança...');
 
       // Desativa AP temporariamente
       exec('nmcli con down AstroPi-AP', { timeout: 5000 }, (err) => {
@@ -120,35 +120,40 @@ function discoveryMode(ws, enable) {
           return;
         }
 
-        log(ws, 'ok', 'AP desativado - você tem 30 segundos para conectar a uma rede');
+        log(ws, 'ok', 'AP desativado - watchdog monitorando conectividade (30s)');
 
-        // Timer para reativar AP automaticamente
-        const reactivationTimer = setTimeout(() => {
-          exec('nmcli con up AstroPi-AP', { timeout: 5000 }, (err2) => {
-            if (!err2) {
-              log(ws, 'dim', 'Modo descoberta expirado - AP reativado automaticamente');
-              refreshNet(ws);
-            }
-          });
-        }, 30000); // 30 segundos
+        // Watchdog: monitora conectividade e reativa AP se necessário
+        let watchdogAttempts = 0;
+        const watchdog = () => {
+          watchdogAttempts++;
 
-        // Monitora conexão STA por 30 segundos
-        let attempts = 0;
-        const checkConnection = () => {
-          attempts++;
-          exec('nmcli -t -g DEVICE,STATE dev | grep "^wlan0:connected"', (err, stdout) => {
-            if (stdout.trim()) {
-              // Conectou! Cancela timer e mantém STA
-              clearTimeout(reactivationTimer);
+          exec('nmcli -t -g DEVICE,STATE dev | grep ":connected"', (err, stdout) => {
+            const hasConnection = stdout.trim().length > 0;
+
+            if (hasConnection) {
+              // Conectou! Cancela watchdog
               log(ws, 'ok', 'Conexão STA detectada - mantendo rede WiFi');
               refreshNet(ws);
-            } else if (attempts < 30) {
-              setTimeout(checkConnection, 1000);
+              return;
             }
+
+            if (watchdogAttempts >= 30) {
+              // Timeout: reativa AP
+              exec('nmcli con up AstroPi-AP', { timeout: 5000 }, (err2) => {
+                if (!err2) {
+                  log(ws, 'wn', 'Watchdog: Timeout sem conexão - AP reativado automaticamente');
+                  refreshNet(ws);
+                }
+              });
+              return;
+            }
+
+            // Continua monitorando
+            setTimeout(watchdog, 1000);
           });
         };
 
-        checkConnection();
+        watchdog();
         refreshNet(ws);
       });
     });
