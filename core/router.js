@@ -37,6 +37,7 @@ const {
 const {
   refreshNet,
   toggleAP,
+  discoveryMode,
 } = require('../services/network');
 
 /* ── Utils ── */
@@ -152,6 +153,10 @@ function handleMsg(session, msg) {
 
     case 'network_status':
       refreshNet(ws);
+      break;
+
+    case 'discovery_mode':
+      discoveryMode(ws, msg.enable);
       break;
 
 

@@ -8,9 +8,34 @@ echo "$LOG Iniciando verificação de rede..."
 # Aguarda o hardware do rádio e o NetworkManager estabilizarem
 sleep 10
 
-# Loop de verificação
+# Verifica se há redes WiFi disponíveis (mesmo se AP estiver ativo)
+echo "$LOG Verificando redes disponíveis..."
+AVAILABLE_NETWORKS=$(nmcli -t -f SSID dev wifi list | grep -v '^$' | wc -l)
+
+if [ "$AVAILABLE_NETWORKS" -gt 0 ]; then
+    echo "$LOG $AVAILABLE_NETWORKS redes encontradas. Tentando conectar..."
+
+    # Desativa AP temporariamente para permitir scan/conexão
+    nmcli con down AstroPi-AP 2>/dev/null
+
+    # Aguarda desativação
+    sleep 3
+
+    # Tenta conectar automaticamente a redes conhecidas
+    nmcli con up --ask no 2>/dev/null
+
+    # Verifica se conectou
+    sleep 5
+    WIFI_STATUS=$(nmcli -t -g DEVICE,STATE dev | grep "^wlan0:connected")
+
+    if [ ! -z "$WIFI_STATUS" ]; then
+        echo "$LOG Conectado com sucesso a rede conhecida!"
+        exit 0
+    fi
+fi
+
+# Loop de verificação para novas conexões
 for i in $(seq 1 $TIMEOUT); do
-    # Esta é a linha que sugeri: ela checa apenas o estado da wlan0
     WIFI_STATUS=$(nmcli -t -g DEVICE,STATE dev | grep "^wlan0:connected")
 
     if [ ! -z "$WIFI_STATUS" ]; then

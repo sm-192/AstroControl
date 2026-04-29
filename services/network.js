@@ -99,7 +99,38 @@ function toggleAP(ws, enable) {
   );
 }
 
+/* Modo descoberta para conectar a novas redes */
+function discoveryMode(ws, enable) {
+  if (enable) {
+    // Desativa AP temporariamente para permitir scan
+    exec('nmcli con down AstroPi-AP', { timeout: 5000 }, (err) => {
+      if (err) {
+        log(ws, 'er', `Modo descoberta falhou: ${err.message}`);
+        return;
+      }
+
+      log(ws, 'ok', 'Modo descoberta ativado - AP desativado temporariamente');
+
+      // Reativa AP automaticamente após 2 minutos se não conectar
+      setTimeout(() => {
+        exec('nmcli con up AstroPi-AP', { timeout: 5000 }, (err2) => {
+          if (!err2) {
+            log(ws, 'dim', 'Modo descoberta expirado - AP reativado');
+            refreshNet(ws);
+          }
+        });
+      }, 120000);
+
+      refreshNet(ws);
+    });
+  } else {
+    // Reativa AP imediatamente
+    toggleAP(ws, true);
+  }
+}
+
 module.exports = {
   refreshNet,
   toggleAP,
+  discoveryMode,
 };
