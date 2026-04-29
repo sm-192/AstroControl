@@ -5,7 +5,7 @@ After=network.target kstars-headless.service indiweb.service
 [Service]
 Type=simple
 User=samu192
-WorkingDirectory=/home/samu192/astrocontrol
+WorkingDirectory=/home/samu192/Astrocontrol
 ExecStart=/usr/bin/node server.js
 Restart=on-failure
 RestartSec=5
