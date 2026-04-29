@@ -32,6 +32,10 @@ const sh = (cmd) => new Promise(resolve =>
   )
 );
 
+function shellEscape(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
 /* Status */
 async function refreshNet(ws) {
   const [con, ip, wifi, apClients] = await Promise.all([
@@ -163,8 +167,31 @@ function discoveryMode(ws, enable) {
   }
 }
 
+/* Conectar a rede WiFi */
+function connectWifi(ws, ssid, password) {
+  const escapedSsid = shellEscape(ssid);
+  const escapedPw   = shellEscape(password);
+
+  log(ws, 'dim', `Conectando a "${ssid}"…`);
+
+  exec(
+    `nmcli dev wifi connect ${escapedSsid} password ${escapedPw}`,
+    { timeout: 20000 },
+    (err) => {
+      log(
+        ws,
+        err ? 'er' : 'ok',
+        err ? `WiFi: ${err.message}` : `Conectado a "${ssid}"`
+      );
+
+      setTimeout(() => refreshNet(ws), 2000);
+    }
+  );
+}
+
 module.exports = {
   refreshNet,
   toggleAP,
   discoveryMode,
+  connectWifi,
 };

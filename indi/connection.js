@@ -56,6 +56,8 @@ function createIndiConn(session) {
   socket.on('close', () => {
     if (destroyed) return;
 
+    session.indiBuffer = ''; // limpa buffer para evitar corrupção na reconexão
+
     emit(session.ws, 'indi_status', { connected: false });
 
     log(

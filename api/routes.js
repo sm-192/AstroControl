@@ -1,132 +1,100 @@
+/**
+ * API Routes — AstroControl
+ * Versão modular, fiel ao server original
+ */
+
 'use strict';
 
-const express  = require('express');
-const crypto   = require('crypto');
-const { spawn, exec } = require('child_process');
-const path     = require('path');
+const express = require('express');
+const router  = express.Router();
 
-const router = express.Router();
+const CFG = require('../config/config');
+const sh   = require('../utils/exec');
+const { createToken, getToken } = require('../utils/tokens');
 
-/* ─────────────────────────────────────────────
-   CONFIG (vem do server principal)
-   ───────────────────────────────────────────── */
-
-let CFG;
-let TOKENS;
-
-/* Inicialização (injeção de dependências) */
-function initRoutes(config, tokensStore) {
-  CFG    = config;
-  TOKENS = tokensStore;
-}
-
-/* ─────────────────────────────────────────────
-   UTIL
-   ───────────────────────────────────────────── */
-
-const sh = (cmd) => new Promise(resolve =>
-  exec(cmd, { timeout: 5000 }, (_, out) => resolve((out || '').trim()))
-);
-
-/* ─────────────────────────────────────────────
-   AUTH — TERMINAL
-   ───────────────────────────────────────────── */
+/* ══════════════════════════════════════════════
+   AUTH — TERMINAL (via POST)
+   ══════════════════════════════════════════════ */
 
 /**
  * POST /api/auth/terminal
  * Body: { user, password }
  */
-router.post('/auth/terminal', (req, res) => {
+router.post('/api/auth/terminal', (req, res) => {
   const { user, password } = req.body || {};
 
   if (!user || !password) {
-    return res.status(400).json({
-      error: 'user e password obrigatórios'
-    });
+    return res.status(400).json({ error: 'user e password obrigatórios' });
   }
 
-  const child = spawn('su', ['-c', 'exit 0', user], {
-    stdio: ['pipe', 'ignore', 'ignore'],
-  });
+  // Validação via su (igual ao server original)
+  const child = require('child_process').spawn(
+    'su',
+    ['-c', 'exit 0', user],
+    { stdio: ['pipe', 'ignore', 'ignore'] }
+  );
 
   child.stdin.write(password + '\n');
   child.stdin.end();
 
   child.on('close', (code) => {
     if (code !== 0) {
-      return res.status(401).json({
-        error: 'Credenciais inválidas'
-      });
+      return res.status(401).json({ error: 'Credenciais inválidas' });
     }
 
-    const token = crypto.randomBytes(32).toString('hex');
-
-    TOKENS.set(token, {
-      user,
-      exp: Date.now() + CFG.TOKEN_TTL_MS
-    });
-
-    setTimeout(() => {
-      TOKENS.delete(token);
-    }, CFG.TOKEN_TTL_MS);
+    // 🔐 Criação de token (modularizado)
+    const token = createToken(user, CFG.TOKEN_TTL_MS);
 
     res.json({
       token,
-      ttl: CFG.TOKEN_TTL_MS
+      ttl: CFG.TOKEN_TTL_MS,
     });
   });
 });
 
-/* ─────────────────────────────────────────────
-   AUTH VERIFY
-   ───────────────────────────────────────────── */
+/* ══════════════════════════════════════════════
+   VERIFY TOKEN
+   ══════════════════════════════════════════════ */
 
-router.get('/auth/verify', (req, res) => {
+/**
+ * GET /api/auth/verify?token=xxx
+ */
+router.get('/api/auth/verify', (req, res) => {
   const token = req.query.token;
-  const t = TOKENS.get(token);
 
-  if (!t || t.exp < Date.now()) {
+  const t = getToken(token);
+
+  if (!t) {
     return res.status(401).end();
   }
 
   res.json({ user: t.user });
 });
 
-/* ─────────────────────────────────────────────
-   SERIAL PORTS
-   ───────────────────────────────────────────── */
+/* ══════════════════════════════════════════════
+   SERIAL PORTS (Linux / Raspberry Pi)
+   ══════════════════════════════════════════════ */
 
-router.get('/ports', async (req, res) => {
+/**
+ * GET /api/ports
+ */
+router.get('/api/ports', async (req, res) => {
   try {
-    const out = await sh(
-      'ls /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* 2>/dev/null'
-    );
-
+    const out = await sh('ls /dev/ttyUSB* /dev/ttyACM* /dev/ttyAMA* 2>/dev/null');
     const ports = out.split('\n').filter(Boolean);
 
     res.json({ ports });
-
   } catch (e) {
     res.json({ ports: [] });
   }
 });
 
-/* ─────────────────────────────────────────────
-   FALLBACK SPA (index.html)
-   ───────────────────────────────────────────── */
+/* ══════════════════════════════════════════════
+   FALLBACK — SPA (index.html)
+   ══════════════════════════════════════════════ */
 
-function setupFallback(app, publicDir) {
-  app.get('*', (_, res) => {
-    res.sendFile(path.join(publicDir, 'index.html'));
-  });
-}
+router.get('*', (req, res) => {
+  res.sendFile(require('path').join(CFG.PUBLIC_DIR, 'index.html'));
+});
 
-/* ─────────────────────────────────────────────
-   EXPORTS
-   ───────────────────────────────────────────── */
-
-module.exports = {
-  router,
-  initRoutes,
-  setupFallback,
-};
+module.exports = router;

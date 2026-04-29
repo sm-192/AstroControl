@@ -98,6 +98,9 @@ function initWebSocket(server) {
     });
   }, CFG.HEARTBEAT_MS);
 
+  /* Limpa o heartbeat quando o servidor fechar */
+  wss.on('close', () => clearInterval(hbInterval));
+
   return { wss, hbInterval };
 }
 
