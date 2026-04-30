@@ -9,6 +9,7 @@
 const { DEVICE_STATE, patchDevice, KNOWN_DEVICES, deviceKey } = require('./state');
 const { emit, log } = require('../utils/emit');
 const { formatRA, formatDec } = require('../utils/format');
+const { notifySequenceFrame } = require('../services/sequencer');
 
 /* ══════════════════════════════════════════════
    HELPERS XML
@@ -332,6 +333,8 @@ function interpret(xml, tag, session) {
         format: sendFmt,
         device: device || '',
       });
+
+      notifySequenceFrame(session);
 
       patchDevice('camera', { capturing: false });
       emit(ws, 'device_update', { key: 'camera', data: DEVICE_STATE.camera });

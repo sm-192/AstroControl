@@ -545,8 +545,42 @@ body {
 .goto-status { font-size:11px; min-height:16px; font-variant-numeric:tabular-nums; margin-top:-2px; }
 
 /* ══════════════════════════════════════
-   CAPTURA / GUIDING
+   SESSÃO / CAPTURA / GUIDING
    ══════════════════════════════════════ */
+.session-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 10px 0 8px;
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+.session-tabs::-webkit-scrollbar { display: none; }
+.session-tab {
+  flex: 0 0 auto;
+  min-width: 72px;
+  padding: 8px 11px;
+  background: #111827;
+  border: .5px solid rgba(255,255,255,.08);
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 10px;
+  cursor: pointer;
+  font-family: inherit;
+}
+.session-tab.active {
+  background: #0a1a10;
+  border-color: var(--green);
+  color: var(--green-l);
+}
+.session-pane {
+  display: none;
+  min-height: 0;
+  padding-bottom: 4px;
+}
+.session-pane.active {
+  display: block;
+}
 .capture-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
@@ -593,6 +627,69 @@ body {
   font-size: 11px;
   color: var(--muted);
 }
+.sequence-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.sequence-list {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.sequence-empty {
+  padding: 14px;
+  border: .5px dashed rgba(255,255,255,.11);
+  border-radius: 8px;
+  color: var(--dim);
+  font-size: 11px;
+  text-align: center;
+}
+.sequence-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  background: var(--bg2);
+  border: .5px solid var(--border);
+  border-radius: 8px;
+}
+.sequence-row.active {
+  border-color: var(--green);
+  background: #0a1a10;
+}
+.sequence-main {
+  flex: 1;
+  min-width: 0;
+}
+.sequence-title {
+  font-size: 12px;
+  color: var(--text);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sequence-meta {
+  margin-top: 2px;
+  font-size: 10px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sequence-remove {
+  flex-shrink: 0;
+  padding: 6px 9px;
+  border-radius: 7px;
+  border: .5px solid rgba(226,75,74,.35);
+  background: #160808;
+  color: var(--red);
+  font-size: 10px;
+  font-family: inherit;
+  cursor: pointer;
+}
 .guiding-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -605,6 +702,9 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 7px;
+}
+.session-actions {
+  margin-top: 8px;
 }
 
 /* ══════════════════════════════════════

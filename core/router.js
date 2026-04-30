@@ -49,6 +49,15 @@ const {
   phd2Dither,
 } = require('../services/phd2');
 
+const {
+  addSequenceItem,
+  removeSequenceItem,
+  clearSequence,
+  startSequence,
+  stopSequence,
+  emitSequence,
+} = require('../services/sequencer');
+
 /* ── Utils ── */
 const { emit } = require('../utils/emit');
 const {
@@ -164,6 +173,32 @@ function handleMsg(session, msg) {
 
     case 'phd2_dither':
       phd2Dither(ws, msg);
+      break;
+
+
+    /* ── Sequencer ── */
+    case 'sequence_status':
+      emitSequence(session);
+      break;
+
+    case 'sequence_add':
+      addSequenceItem(session, msg.item);
+      break;
+
+    case 'sequence_remove':
+      removeSequenceItem(session, msg.id);
+      break;
+
+    case 'sequence_clear':
+      clearSequence(session);
+      break;
+
+    case 'sequence_start':
+      startSequence(session);
+      break;
+
+    case 'sequence_stop':
+      stopSequence(session);
       break;
 
 

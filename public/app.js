@@ -25,6 +25,7 @@ const STATE = {
     gps: { connected: false, state: 'disconnected', lat: null, lon: null, fix: false, sats: 0 },
   },
   currentTab: 'mount',
+  sessionTab: 'setup',
   slewRate: 16,
   tracking: null,
   gotoStatus: null,
@@ -32,6 +33,17 @@ const STATE = {
   drivers: [],
   indiserver: false,
   phd2: { online: false, connected: false, appState: 'offline', equipment: null, exposure: null, error: null },
+  sequence: {
+    queue: [],
+    running: false,
+    paused: false,
+    currentIndex: -1,
+    frameInItem: 0,
+    doneFrames: 0,
+    totalFrames: 0,
+    awaitingFrame: false,
+    status: 'Pronto',
+  },
   logs: [],
   customDrivers: [],
   devicePorts: {},
@@ -74,7 +86,6 @@ function render() {
 
   if (STATE.currentTab === 'mount') renderMount();
   if (STATE.currentTab === 'capture') renderCapture();
-  if (STATE.currentTab === 'guiding') renderGuiding();
   if (STATE.currentTab === 'drivers') renderDrivers();
   if (STATE.currentTab === 'network') renderNetwork();
 
@@ -286,15 +297,21 @@ function renderCameraMini(c) {
 
 function renderCapture() {
   const c = STATE.devices.camera;
+  const f = STATE.devices.focuser;
   renderCameraMini(c);
   syncCaptureInputs(c);
+  renderSessionSetup();
+  renderSessionMount();
+  renderGuiding();
+  renderSequence();
+  renderSessionLog();
+  _updateCamButtons();
 
-  const seqBtn = $('seq-btn');
-  if (seqBtn) seqBtn.textContent = SEQ.running ? 'Parar sequência' : 'Iniciar sequência';
-  const seqStatus = $('seq-status');
-  if (seqStatus) seqStatus.textContent = SEQ.running
-    ? `Sequência ${SEQ.done}/${SEQ.total}`
-    : SEQ.done > 0 ? `Última sequência: ${SEQ.done}/${SEQ.total}` : 'Pronto';
+  setText('session-focus-pos', f.position != null ? f.position : '--');
+  const sessionFocus = $('session-focus-abs');
+  if (sessionFocus && sessionFocus !== document.activeElement && f.position != null) {
+    sessionFocus.value = f.position;
+  }
 }
 
 function syncCaptureInputs(c) {
@@ -327,6 +344,132 @@ function renderGuiding() {
         .join(' · ')
     : '--';
   setText('phd2-equipment', eqText || '--');
+}
+
+function renderSessionSetup() {
+  setText('session-indi', STATE.indiConnected ? 'Conectado' : 'Offline');
+  setText('session-setup-mount', STATE.devices.mount.connected ? (STATE.devices.mount.state || 'Pronto') : 'Offline');
+  setText('session-setup-camera', STATE.devices.camera.connected ? (STATE.devices.camera.state || 'Pronta') : 'Offline');
+  setText('session-setup-guide', STATE.phd2.online ? (STATE.phd2.connected ? 'Conectado' : 'Online') : 'Offline');
+}
+
+function renderSessionMount() {
+  const m = STATE.devices.mount;
+  setText('session-m-ra', m.ra || '--');
+  setText('session-m-dec', m.dec || '--');
+  setText('session-m-alt', m.alt != null ? m.alt + '°' : '--');
+  setText('session-m-az', m.az != null ? m.az + '°' : '--');
+}
+
+function renderSequence() {
+  const seq = STATE.sequence;
+  const status = $('seq-status');
+  if (status) {
+    const progress = seq.totalFrames > 0 ? ` · ${seq.doneFrames}/${seq.totalFrames}` : '';
+    status.textContent = `${seq.status || 'Pronto'}${progress}`;
+  }
+
+  const startBtn = $('seq-start-btn');
+  if (startBtn) {
+    startBtn.textContent = seq.running ? 'Executando' : 'Iniciar';
+    startBtn.disabled = !!seq.running || !seq.queue.length;
+  }
+
+  const list = $('sequence-list');
+  if (!list) return;
+
+  if (!seq.queue || seq.queue.length === 0) {
+    list.innerHTML = '<div class="sequence-empty">Fila vazia</div>';
+    return;
+  }
+
+  const html = seq.queue.map((item, idx) => {
+    const active = seq.running && idx === seq.currentIndex;
+    const filter = item.filterSlot ? `Filtro ${item.filterSlot}` : 'Sem filtro';
+    const dither = item.ditherEvery > 0 ? `Dither ${item.ditherEvery}` : 'Sem dither';
+    const remove = seq.running
+      ? ''
+      : `<button class="sequence-remove" onclick="removeSequenceItem('${item.id}')">Remover</button>`;
+
+    return `
+      <div class="sequence-row ${active ? 'active' : ''}">
+        <div class="sequence-main">
+          <div class="sequence-title">${escapeHtml(item.target)} · ${escapeHtml(item.type)}</div>
+          <div class="sequence-meta">${item.exposure}s · ganho ${item.gain} · ${item.done || 0}/${item.count} · ${filter} · ${dither}</div>
+        </div>
+        ${remove}
+      </div>`;
+  }).join('');
+
+  if (list.innerHTML !== html) list.innerHTML = html;
+}
+
+function renderSessionLog() {
+  const logEl = $('session-log');
+  if (!logEl || logEl.dataset.logLen === String(STATE.logs.length)) return;
+
+  const frag = document.createDocumentFragment();
+  const sessionLogs = STATE.logs.slice(-80);
+  sessionLogs.forEach(({ level, text }) => {
+    const div = document.createElement('div');
+    const span = document.createElement('span');
+    span.className = level;
+    span.textContent = level === 'ok' ? '[OK]' : level === 'er' ? '[ER]' : level === 'wn' ? '[--]' : '[..]';
+    div.appendChild(span);
+    div.appendChild(document.createTextNode(' ' + text));
+    frag.appendChild(div);
+  });
+
+  logEl.innerHTML = '';
+  logEl.appendChild(frag);
+  logEl.scrollTop = logEl.scrollHeight;
+  logEl.dataset.logLen = String(STATE.logs.length);
+}
+
+function addSequenceItem() {
+  if (STATE.sequence.running) return;
+  const filterRaw = parseInt($('seq-filter')?.value);
+  const item = {
+    target: ($('seq-target')?.value || 'Alvo').trim(),
+    type: $('seq-type')?.value || 'Light',
+    exposure: parseFloat($('cap-exp')?.value) || 1,
+    gain: parseInt($('cap-gain')?.value) || 100,
+    count: parseInt($('seq-count')?.value) || 1,
+    delay: parseFloat($('seq-delay')?.value) || 0,
+    filterSlot: Number.isFinite(filterRaw) ? filterRaw : null,
+    ditherEvery: parseInt($('seq-dither')?.value) || 0,
+  };
+  sendCmd({ type: 'sequence_add', item });
+}
+
+function removeSequenceItem(id) {
+  sendCmd({ type: 'sequence_remove', id });
+}
+
+function clearSequenceQueue() {
+  sendCmd({ type: 'sequence_clear' });
+}
+
+function startBackendSequence() {
+  if (CAM.mode === 'framing') _stopFraming();
+  if (CAM.mode === 'capturing') _stopCapture(true);
+  sendCmd({ type: 'sequence_start' });
+}
+
+function stopBackendSequence() {
+  sendCmd({ type: 'sequence_stop' }, false);
+  _updateCamButtons();
+}
+
+function focusGotoSession() {
+  const pos = parseInt($('session-focus-abs')?.value);
+  if (isNaN(pos)) return;
+  sendCmd({ type: 'focus_goto', position: pos });
+}
+
+function solverPlaceholder() {
+  setText('solver-last', 'Solver local ainda não configurado');
+  addLog('wn', 'Solver: integração ASTAP/StellarSolver pendente');
 }
 
 function renderDrivers() {
@@ -652,6 +795,10 @@ function handleMsg(msg) {
       });
       break;
 
+    case 'sequence_update':
+      setState({ sequence: { ...STATE.sequence, ...msg } });
+      break;
+
     case 'log':
       addLog(msg.level, msg.text);
       break;
@@ -673,7 +820,7 @@ function driverKey(name) {
 function addLog(level, text) {
   STATE.logs.push({ level, text });
   if (STATE.logs.length > 200) STATE.logs.splice(0, 100);
-  if (STATE.currentTab === 'drivers') scheduleRender();
+  if (STATE.currentTab === 'drivers' || STATE.currentTab === 'capture') scheduleRender();
 }
 
 /* ══════════════════════════════════════════════
@@ -758,9 +905,26 @@ function sw(id, el) {
   if (id === 'align') { if (typeof renderAlign === 'function') renderAlign(); }
   if (id === 'network') sendCmd({ type: 'network_status' }, false);
   if (id === 'drivers') sendCmd({ type: 'get_state' }, false);
-  if (id === 'guiding') refreshPHD2();
+  if (id === 'capture') {
+    refreshPHD2();
+    sendCmd({ type: 'sequence_status' }, false);
+  }
   // Pausa framing ao sair da aba de montagem
   if (id !== 'mount' && id !== 'capture' && CAM.mode === 'framing') _stopFraming();
+}
+
+function sessionTab(id, el) {
+  document.querySelectorAll('.session-pane').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.session-tab').forEach(t => t.classList.remove('active'));
+
+  const pane = $('session-' + id);
+  if (pane) pane.classList.add('active');
+  if (el) el.classList.add('active');
+
+  STATE.sessionTab = id;
+  if (id === 'guide') refreshPHD2();
+  if (id === 'sequence') sendCmd({ type: 'sequence_status' }, false);
+  scheduleRender();
 }
 
 /* ══════════════════════════════════════════════
@@ -1086,13 +1250,6 @@ const CAM = {
   framingWatchdog: null,
 };
 
-const SEQ = {
-  running: false,
-  total: 0,
-  done: 0,
-  delayTimer: null,
-};
-
 /* Chamado pelo server quando chega um BLOB (camera_image) */
 function onCameraImage(msg) {
   renderCameraPreview(msg);
@@ -1104,7 +1261,6 @@ function onCameraImage(msg) {
     CAM.mode = 'idle';
     _stopExpBar();
     _updateCamButtons();
-    _onSequenceFrameDone();
   }
 }
 
@@ -1248,12 +1404,12 @@ function _updateCamButtons() {
   if (cfBtn) {
     cfBtn.classList.toggle('active', isFraming);
     cfBtn.textContent = isFraming ? 'Parar' : 'Framing';
-    cfBtn.disabled = isCapturing || SEQ.running;
+    cfBtn.disabled = isCapturing || STATE.sequence.running;
   }
   if (ccBtn) {
     ccBtn.classList.toggle('capturing', isCapturing);
     ccBtn.textContent = isCapturing ? 'Parar' : 'Capturar';
-    ccBtn.disabled = isFraming || SEQ.running;
+    ccBtn.disabled = isFraming || STATE.sequence.running;
   }
 }
 
@@ -1284,55 +1440,6 @@ function _cameraParams() {
 
   return { exp, gain };
 }
-
-function toggleSequence() {
-  if (SEQ.running) {
-    _stopSequence();
-    return;
-  }
-
-  SEQ.running = true;
-  SEQ.total = Math.max(1, parseInt($('seq-count')?.value) || 1);
-  SEQ.done = 0;
-  _updateCamButtons();
-  scheduleRender();
-  _shootSequenceFrame();
-}
-
-function _shootSequenceFrame() {
-  if (!SEQ.running) return;
-  if (SEQ.done >= SEQ.total) {
-    _stopSequence(false);
-    return;
-  }
-  if (CAM.mode !== 'idle') return;
-  _startCapture();
-}
-
-function _onSequenceFrameDone() {
-  if (!SEQ.running) return;
-
-  SEQ.done += 1;
-  scheduleRender();
-
-  if (SEQ.done >= SEQ.total) {
-    _stopSequence(false);
-    return;
-  }
-
-  const delay = Math.max(0, parseFloat($('seq-delay')?.value) || 0) * 1000;
-  clearTimeout(SEQ.delayTimer);
-  SEQ.delayTimer = setTimeout(_shootSequenceFrame, delay);
-}
-
-function _stopSequence(abort = true) {
-  SEQ.running = false;
-  clearTimeout(SEQ.delayTimer);
-  if (abort && CAM.mode === 'capturing') _stopCapture(true);
-  _updateCamButtons();
-  scheduleRender();
-}
-
 
 /* ══════════════════════════════════════════════
    DRIVERS
@@ -1718,6 +1825,14 @@ function tickClock() {
 
 function $(id) { return document.getElementById(id); }
 function setText(id, t) { const e = $(id); if (e && e.textContent !== t) e.textContent = t; }
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 /* ══════════════════════════════════════════════
    SERVICE WORKER

@@ -47,13 +47,9 @@
       <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><circle cx="7" cy="7" r="5"/><circle cx="7" cy="7" r="1.5" fill="currentColor"/><line x1="7" y1="1" x2="7" y2="3"/><line x1="7" y1="11" x2="7" y2="13"/><line x1="1" y1="7" x2="3" y2="7"/><line x1="11" y1="7" x2="13" y2="7"/></svg>
       <span class="tab-label">Polar</span>
     </div>
-    <div class="tab" onclick="sw('capture',this)" title="Captura">
+    <div class="tab" onclick="sw('capture',this)" title="Sessão">
       <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="2" y="3" width="10" height="8" rx="1.5"/><circle cx="7" cy="7" r="2.2"/><path d="M4.5 3l.8-1h3.4l.8 1"/></svg>
-      <span class="tab-label">Captura</span>
-    </div>
-    <div class="tab" onclick="sw('guiding',this)" title="Guiding">
-      <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><polyline points="1,10 3,6 5,8 7,4 9,7 11,5 13,9"/><circle cx="7" cy="4" r="1" fill="currentColor" stroke="none"/></svg>
-      <span class="tab-label">Guiding</span>
+      <span class="tab-label">Sessão</span>
     </div>
     <div class="tab" onclick="sw('desktop',this)" title="KasmVNC">
       <svg viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="1" y="2" width="12" height="8" rx="1"/><line x1="5" y1="12" x2="9" y2="12"/><line x1="7" y1="10" x2="7" y2="12"/></svg>
@@ -433,15 +429,55 @@
       <span   id="dec-bar-val"                     style="display:none"></span>
     </div>
 
-    <!-- ══════════ CAPTURA ══════════ -->
+    <!-- ══════════ SESSÃO / EKOS-LIKE ══════════ -->
     <div id="p-capture" class="panel panel-scroll">
       <div class="panel-bar panel-bar-scroll">
-        <span class="panel-bar-title">Captura</span>
+        <span class="panel-bar-title">Sessão</span>
         <button class="bp-fs" onclick="enterFullscreen('p-capture')" title="Tela cheia">
           <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9"/></svg>
         </button>
       </div>
 
+      <div class="session-tabs">
+        <button class="session-tab active" onclick="sessionTab('setup',this)">Setup</button>
+        <button class="session-tab" onclick="sessionTab('mount',this)">Montagem</button>
+        <button class="session-tab" onclick="sessionTab('capture',this)">Captura</button>
+        <button class="session-tab" onclick="sessionTab('focus',this)">Foco</button>
+        <button class="session-tab" onclick="sessionTab('guide',this)">Guia</button>
+        <button class="session-tab" onclick="sessionTab('solve',this)">Solver</button>
+        <button class="session-tab" onclick="sessionTab('sequence',this)">Sequência</button>
+        <button class="session-tab" onclick="sessionTab('logs',this)">Logs</button>
+      </div>
+
+      <div id="session-setup" class="session-pane active">
+        <div class="guiding-grid">
+          <div class="net-card"><div class="net-label">INDI</div><div class="net-val" id="session-indi">--</div></div>
+          <div class="net-card"><div class="net-label">Montagem</div><div class="net-val" id="session-setup-mount">--</div></div>
+          <div class="net-card"><div class="net-label">Câmera</div><div class="net-val" id="session-setup-camera">--</div></div>
+          <div class="net-card"><div class="net-label">Guia</div><div class="net-val" id="session-setup-guide">--</div></div>
+        </div>
+        <div class="guiding-actions session-actions">
+          <button class="bp bp-s" onclick="sendCmd({type:'get_state'}, false)">Atualizar drivers</button>
+          <button class="bp bp-s" onclick="refreshPHD2()">Atualizar PHD2</button>
+        </div>
+      </div>
+
+      <div id="session-mount" class="session-pane">
+        <div class="guiding-grid">
+          <div class="net-card"><div class="net-label">RA</div><div class="net-val" id="session-m-ra">--</div></div>
+          <div class="net-card"><div class="net-label">DEC</div><div class="net-val" id="session-m-dec">--</div></div>
+          <div class="net-card"><div class="net-label">ALT</div><div class="net-val" id="session-m-alt">--</div></div>
+          <div class="net-card"><div class="net-label">AZ</div><div class="net-val" id="session-m-az">--</div></div>
+        </div>
+        <div class="guiding-actions session-actions">
+          <button class="bp bp-s" onclick="parkMount()">Park</button>
+          <button class="bp bp-s" onclick="unparkMount()">Unpark</button>
+          <button class="bp bp-s" onclick="syncMount()">Sync</button>
+          <button class="bp bp-s" onclick="meridianFlip()">Flip</button>
+        </div>
+      </div>
+
+      <div id="session-capture" class="session-pane">
       <div class="capture-layout">
         <div class="capture-viewer">
           <canvas id="capture-preview-canvas" class="capture-preview-canvas"></canvas>
@@ -454,6 +490,19 @@
         <div class="capture-controls">
           <div class="sec">Exposição</div>
           <div class="capture-grid">
+            <div class="cam-field">
+              <label class="cam-label">Alvo</label>
+              <input class="inp cam-inp" type="text" id="seq-target" value="Alvo"/>
+            </div>
+            <div class="cam-field">
+              <label class="cam-label">Tipo</label>
+              <select class="inp cam-inp" id="seq-type">
+                <option>Light</option>
+                <option>Dark</option>
+                <option>Flat</option>
+                <option>Bias</option>
+              </select>
+            </div>
             <div class="cam-field">
               <label class="cam-label">Exp (s)</label>
               <input class="inp cam-inp" type="number" id="cap-exp" min="0.001" step="0.1" value="1"/>
@@ -468,7 +517,7 @@
             <button class="cam-capture-btn" id="cap-capture-btn" onclick="toggleCapture()">Capturar</button>
           </div>
 
-          <div class="sec">Sequência simples</div>
+          <div class="sec">Adicionar à fila</div>
           <div class="capture-grid">
             <div class="cam-field">
               <label class="cam-label">Frames</label>
@@ -478,22 +527,39 @@
               <label class="cam-label">Intervalo (s)</label>
               <input class="inp cam-inp" type="number" id="seq-delay" min="0" step="1" value="2"/>
             </div>
+            <div class="cam-field">
+              <label class="cam-label">Filtro</label>
+              <input class="inp cam-inp" type="number" id="seq-filter" min="1" step="1" placeholder="Slot"/>
+            </div>
+            <div class="cam-field">
+              <label class="cam-label">Dither a cada</label>
+              <input class="inp cam-inp" type="number" id="seq-dither" min="0" step="1" value="0"/>
+            </div>
           </div>
-          <button class="bp bp-p" id="seq-btn" onclick="toggleSequence()">Iniciar sequência</button>
-          <div class="sequence-status" id="seq-status">Pronto</div>
+          <button class="bp bp-p" onclick="addSequenceItem()">Adicionar item</button>
         </div>
       </div>
-    </div>
-
-    <!-- ══════════ GUIDING ══════════ -->
-    <div id="p-guiding" class="panel panel-scroll">
-      <div class="panel-bar panel-bar-scroll">
-        <span class="panel-bar-title">Guiding</span>
-        <button class="bp-fs" onclick="enterFullscreen('p-guiding')" title="Tela cheia">
-          <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M1 5V1h4M9 1h4v4M13 9v4H9M5 13H1V9"/></svg>
-        </button>
       </div>
 
+      <div id="session-focus" class="session-pane">
+        <div class="capture-controls">
+          <div class="sec">Foco manual</div>
+          <div class="focus-row">
+            <button class="focus-btn" onpointerdown="focusMove(-100)" onpointerup="focusStop()" onpointercancel="focusStop()">−100</button>
+            <button class="focus-btn" onpointerdown="focusMove(-10)" onpointerup="focusStop()" onpointercancel="focusStop()">−10</button>
+            <div class="focus-pos-wrap"><div class="focus-pos" id="session-focus-pos">--</div><div class="focus-pos-label">steps</div></div>
+            <button class="focus-btn" onpointerdown="focusMove(10)" onpointerup="focusStop()" onpointercancel="focusStop()">+10</button>
+            <button class="focus-btn" onpointerdown="focusMove(100)" onpointerup="focusStop()" onpointercancel="focusStop()">+100</button>
+          </div>
+          <div class="focus-abs-row">
+            <input class="inp" type="number" id="session-focus-abs" placeholder="Posição absoluta" min="0" step="1"/>
+            <button class="bp bp-s" onclick="focusGotoSession()">Ir</button>
+          </div>
+          <div class="sequence-status">Autofocus: pendente</div>
+        </div>
+      </div>
+
+      <div id="session-guide" class="session-pane">
       <div class="guiding-grid">
         <div class="net-card"><div class="net-label">PHD2</div><div class="net-val" id="phd2-online">--</div></div>
         <div class="net-card"><div class="net-label">Estado</div><div class="net-val" id="phd2-state">--</div></div>
@@ -528,6 +594,37 @@
           <label class="cam-label">Dither (px)</label>
           <input class="inp cam-inp" type="number" id="phd2-dither-amount" min="0.1" step="0.5" value="3"/>
         </div>
+      </div>
+      </div>
+
+      <div id="session-solve" class="session-pane">
+        <div class="capture-controls">
+          <div class="sec">Plate solving</div>
+          <div class="guiding-grid">
+            <div class="net-card"><div class="net-label">Solver</div><div class="net-val">Pendente</div></div>
+            <div class="net-card"><div class="net-label">Última solução</div><div class="net-val" id="solver-last">--</div></div>
+          </div>
+          <div class="guiding-actions">
+            <button class="bp bp-s" onclick="solverPlaceholder()">Capturar e resolver</button>
+            <button class="bp bp-s" onclick="solverPlaceholder()">Sync</button>
+            <button class="bp bp-s" onclick="solverPlaceholder()">Slew corrigido</button>
+          </div>
+          <div class="sequence-status">ASTAP/StellarSolver: pendente</div>
+        </div>
+      </div>
+
+      <div id="session-sequence" class="session-pane">
+        <div class="sequence-toolbar">
+          <button class="bp bp-p" id="seq-start-btn" onclick="startBackendSequence()">Iniciar</button>
+          <button class="bp bp-s" onclick="stopBackendSequence()">Parar</button>
+          <button class="bp bp-s" onclick="clearSequenceQueue()">Limpar</button>
+        </div>
+        <div class="sequence-status" id="seq-status">Pronto</div>
+        <div id="sequence-list" class="sequence-list"></div>
+      </div>
+
+      <div id="session-logs" class="session-pane">
+        <div class="log" id="session-log"><div><span class="dim">[--]</span> Aguardando eventos da sessão…</div></div>
       </div>
     </div>
 
