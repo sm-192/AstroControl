@@ -15,7 +15,7 @@
 
 'use strict';
 
-const CACHE_NAME   = 'astrocontrol-v3';
+const CACHE_NAME   = 'astrocontrol-v4';
 const STATIC_SHELL = [
   '/',
   '/index.html',
@@ -36,6 +36,7 @@ function isDynamic(url) {
     url.protocol === 'wss:'  ||
     url.port === '8443'      ||
     url.port === '8444'      ||
+    url.port === '8445'      ||
     url.port === '4400'      ||
     url.port === '7681'      ||
     url.port === '8624'      ||

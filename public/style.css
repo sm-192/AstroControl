@@ -902,6 +902,14 @@ body {
 .remote-bar-left  { display:flex; align-items:center; gap:8px; min-width:0; }
 .remote-bar-right { display:flex; align-items:center; gap:6px; flex-shrink:0; }
 .remote-title { font-size:12px; color:#9ca3b0; white-space:nowrap; }
+.remote-port-input {
+  width: 64px; height: 28px; flex-shrink: 0;
+  background: var(--bg0); border: .5px solid var(--border-mid);
+  border-radius: 6px; color: var(--text);
+  font: 11px 'SF Mono', Monaco, monospace;
+  padding: 0 6px; outline: none;
+}
+.remote-port-input:focus { border-color: var(--purple); }
 
 .remote-frame {
   flex:1; min-height:0; background:var(--bg3);

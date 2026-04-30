@@ -624,7 +624,7 @@ function renderGpsSatIndicator() {
 const WS_HOST = window.location.hostname || 'astropi.local';
 const WS_PORT = parseInt(window.location.port) || 3000;
 const WS_URL = `ws://${WS_HOST}:${WS_PORT}/ws`;
-const KASMVNC_PORT = 8443;
+const KASMVNC_PORT = parseInt(localStorage.getItem('astro_kasmvnc_port'), 10) || 8444;
 const KSTARS_VNC_PORT = 8444;
 
 let ws = null;
@@ -1645,6 +1645,30 @@ function _remoteClientUrl(port) {
   return `https://${WS_HOST}:${port || KASMVNC_PORT}/`;
 }
 
+function getRemotePort(inputId, fallbackPort) {
+  const input = $(inputId);
+  const port = parseInt(input?.value, 10);
+  const validPort = Number.isFinite(port) && port > 0 && port <= 65535
+    ? port
+    : fallbackPort;
+
+  if (inputId === 'remote-d-port') {
+    localStorage.setItem('astro_kasmvnc_port', String(validPort));
+  }
+
+  return validPort;
+}
+
+function _initRemotePortControls() {
+  const desktopPort = $('remote-d-port');
+  if (desktopPort) {
+    desktopPort.value = String(KASMVNC_PORT);
+    desktopPort.addEventListener('change', () => {
+      desktopPort.value = String(getRemotePort('remote-d-port', KASMVNC_PORT));
+    });
+  }
+}
+
 /**
  * Injeta o iframe remoto.
  */
@@ -1952,3 +1976,4 @@ connectSensors();
 requestAnimationFrame(tickClock);
 scheduleRender();
 _remoteGlobalResizeInit();
+_initRemotePortControls();
